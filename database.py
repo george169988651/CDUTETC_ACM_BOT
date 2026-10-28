@@ -77,6 +77,14 @@ CREATE TABLE IF NOT EXISTS competitions (
 )
 """
 
+_WEEKLY_CONTEST_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS weekly_contest_runs (
+    week_start      TEXT PRIMARY KEY,
+    competition_id  INTEGER NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT ''
+)
+"""
+
 _COMPETITION_SOURCES_DDL = """
 CREATE TABLE IF NOT EXISTS competition_sources (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,7 +273,8 @@ _INDEX_DDL = (
 
 _ALL_DDL = (
     _MAIN_DDL, _REMIND_DDL,
-    _COMPETITIONS_DDL, _COMPETITION_SOURCES_DDL, _COMPETITION_VERSIONS_DDL,
+    _COMPETITIONS_DDL, _WEEKLY_CONTEST_RUNS_DDL,
+    _COMPETITION_SOURCES_DDL, _COMPETITION_VERSIONS_DDL,
     _PENDING_UPDATES_DDL,
     _ORG_EVENTS_DDL,
     _TRAINING_SESSIONS_DDL, _GROUP_FAQ_DDL, _UNANSWERED_DDL,
@@ -508,6 +517,33 @@ def create_competition(info: dict, status: str = "draft", operator: str = "",
         return _create_competition_on(conn, info, status, operator)
     with _connect() as conn:
         return _create_competition_on(conn, info, status, operator)
+
+
+def create_weekly_competition(week_start: str, info: dict) -> tuple[int, bool]:
+    """按北京时间周一日期幂等创建周赛，返回（比赛 id，是否新建）。
+
+    周标识独立于名称与比赛时间；改名、修正或重启不改变本周生成记录。
+    独占写事务确保多实例查重、比赛/版本创建与周记录写入原子完成。
+    """
+    week = datetime.strptime(week_start, "%Y-%m-%d")
+    if week.weekday() != 0:
+        raise ValueError("周赛周标识必须是周一日期")
+    week_start = week.date().isoformat()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT competition_id FROM weekly_contest_runs WHERE week_start = ?",
+            (week_start,),
+        ).fetchone()
+        if existing is not None:
+            return existing[0], False
+        cid = _create_competition_on(conn, info, "confirmed", "weekly:auto")
+        conn.execute(
+            "INSERT INTO weekly_contest_runs (week_start, competition_id, created_at)"
+            " VALUES (?, ?, ?)",
+            (week_start, cid, now_str()),
+        )
+    return cid, True
 
 
 def get_competition(cid: int) -> dict | None:
