@@ -542,7 +542,7 @@ async def handle_non_command_message(text: str, group_id: str, sender: str) -> l
     if faq is not None:
         return [{"group_id": group_id, "text": f"Q：{faq['question']}\nA：{faq['answer']}"}]
     try:
-        answer = await llm.answer_question(text, db.list_recent_contests(group_id))
+        answer = await llm.answer_question(text, db.list_question_contests(group_id))
     except Exception:  # noqa: BLE001
         answer = "模型暂时不可用，请稍后再试~"
     if answer.startswith("模型暂时不可用"):
