@@ -32,7 +32,7 @@ import commands
 import config
 import crawler
 import database as db
-from database import create_competition, init_db
+from database import create_competition, create_published_competition, init_db
 from fetcher import FetchError, fetch_text
 from llm import extract_contest
 from reminder import check_general_reminders, check_reminders
@@ -238,9 +238,8 @@ class ACMBot(botpy.Client):
 
         info["source_link"] = url
         try:
-            # v2 免审发布：直接创建 confirmed 正式比赛（无审核环节），
-            # 超管后续可用 /修正 纠错或重新提取。
-            create_competition(
+            # 正式比赛、来源和已抓取正文基线一并提交，供后台检测后续变化。
+            create_published_competition(
                 {
                     "name": info.get("name", ""),
                     "official_reg_deadline": info.get("reg_deadline", ""),
@@ -249,7 +248,8 @@ class ACMBot(botpy.Client):
                     "official_site": info.get("source_link", ""),
                     "summary": "",
                 },
-                status="confirmed",
+                source_url=url,
+                source_text=page,
                 operator=f"publish:{member_id}",
             )
         except ValueError as e:

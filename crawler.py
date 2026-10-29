@@ -171,6 +171,8 @@ async def run_fetch(now: datetime | None = None,
             continue
 
         comp_info = _map_competition_info(info)
+        # 来源地址取自已登记的抓取任务，模型可能漏提或生成错误链接。
+        comp_info["official_site"] = source["url"]
         try:
             existing = db.get_competition(source["competition_id"])
             if existing is None:

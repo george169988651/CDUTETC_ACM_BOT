@@ -19,6 +19,7 @@
 - 写操作走事务；事务提交成功才返回成功。
 """
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime
@@ -765,16 +766,21 @@ def add_competition_source(cid: int, url: str,
 
 def update_source_fetch(source_id: int, *, etag: str = "", last_modified: str = "",
                         body_hash: str = "", last_status: str = "",
-                        last_error: str = "", last_fetched_at: str | None = None) -> None:
-    """更新来源抓取状态；last_fetched_at 默认取当前北京时间（可由调用方注入以便测试）。"""
+                        last_error: str = "", last_fetched_at: str | None = None,
+                        conn: sqlite3.Connection | None = None) -> None:
+    """更新来源状态；时间默认取北京时间，传入 conn 时参与调用方事务。"""
     if last_fetched_at is None:
         last_fetched_at = now_str()
+    sql = (
+        "UPDATE competition_sources SET etag = ?, last_modified = ?, body_hash = ?,"
+        " last_fetched_at = ?, last_status = ?, last_error = ? WHERE id = ?"
+    )
+    values = (etag, last_modified, body_hash, last_fetched_at, last_status, last_error, source_id)
+    if conn is not None:
+        conn.execute(sql, values)
+        return
     with _connect() as conn:
-        conn.execute(
-            "UPDATE competition_sources SET etag = ?, last_modified = ?, body_hash = ?,"
-            " last_fetched_at = ?, last_status = ?, last_error = ? WHERE id = ?",
-            (etag, last_modified, body_hash, last_fetched_at, last_status, last_error, source_id),
-        )
+        conn.execute(sql, values)
 
 
 def get_source_by_url(url: str) -> dict | None:
@@ -797,6 +803,27 @@ def list_sources(competition_id: int | None = None) -> list[dict]:
                 (competition_id,),
             ).fetchall()
     return [_row_to_source(r) for r in rows]
+
+
+def create_published_competition(info: dict, source_url: str, source_text: str,
+                                operator: str = "") -> int:
+    """同事务发布正式比赛、登记来源并保存已抓取正文的变化检测基线。"""
+    source_url = _as_str(source_url)
+    if not source_url:
+        raise ValueError("来源 URL 不能为空")
+    if not isinstance(source_text, str):
+        raise ValueError("来源正文必须是字符串")
+    body_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    with _connect() as conn:
+        cid = create_competition(
+            {**info, "official_site": source_url}, status="confirmed",
+            operator=operator, conn=conn,
+        )
+        sid = add_competition_source(cid, source_url, conn=conn)
+        update_source_fetch(
+            sid, body_hash=body_hash, last_status="confirmed", conn=conn,
+        )
+        return cid
 
 
 # =====================================================================
