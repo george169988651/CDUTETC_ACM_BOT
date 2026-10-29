@@ -8,6 +8,14 @@
 
 import os
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 # ================= QQ 机器人（必填） =================
 APPID = os.getenv("ACM_APPID", "")
 APP_SECRET = os.getenv("ACM_APP_SECRET", "")
@@ -55,6 +63,24 @@ FETCH_TEXT_LIMIT = int(os.getenv("ACM_FETCH_TEXT_LIMIT", "3000"))         # 送�
 LLM_MAX_INPUT_CHARS = int(os.getenv("ACM_LLM_MAX_INPUT_CHARS", "6000"))   # 单次请求输入长度上限
 LLM_MAX_OUTPUT_TOKENS = int(os.getenv("ACM_LLM_MAX_OUTPUT_TOKENS", "2000"))  # 单次请求输出长度上限
 LLM_CONCURRENCY = int(os.getenv("ACM_LLM_CONCURRENCY", "2"))              # 模型并发请求上限
+LLM_QA_MAX_TOKENS = int(os.getenv("ACM_LLM_QA_MAX_TOKENS", "600"))        # 问答输出上限
+LLM_EXTRACT_MAX_TOKENS = int(os.getenv("ACM_LLM_EXTRACT_MAX_TOKENS", "800"))  # 抽取输出上限
+LLM_TIMEOUT = float(os.getenv("ACM_LLM_TIMEOUT", "30"))                   # 模型请求超时（秒）
+
+# ================= 提示词注入 / 越狱防护 =================
+# 总开关只控制输入风险分级；输出护栏始终生效（紧急排障时可临时关闭风险拦截）。
+SEC_ENABLED = _env_bool("ACM_SEC_ENABLED", True)
+SEC_RISK_BLOCK = int(os.getenv("ACM_SEC_RISK_BLOCK", "5"))       # ≥ 该分数直接拒答
+SEC_RISK_SANDBOX = int(os.getenv("ACM_SEC_RISK_SANDBOX", "2"))   # ≥ 该分数追加严格提示
+SEC_LOG_EXCERPT = int(os.getenv("ACM_SEC_LOG_EXCERPT", "100"))   # 安全日志截断长度
+QA_MAX_QUESTION_CHARS = int(os.getenv("ACM_QA_MAX_QUESTION_CHARS", "500"))
+QA_MAX_ANSWER_CHARS = int(os.getenv("ACM_QA_MAX_ANSWER_CHARS", "800"))
+QA_RATE_PER_MINUTE = int(os.getenv("ACM_QA_RATE_PER_MINUTE", "6"))
+QA_RATE_PER_HOUR = int(os.getenv("ACM_QA_RATE_PER_HOUR", "40"))
+QA_DUP_WINDOW_SECONDS = int(os.getenv("ACM_QA_DUP_WINDOW_SECONDS", "600"))
+QA_ALLOW_ARCHIVE_LINKS = _env_bool("ACM_QA_ALLOW_ARCHIVE_LINKS", True)
+# 生产环境建议开启：自动抓取/发布依赖域名白名单，避免任意公网页面进入模型上下文。
+FETCH_REQUIRE_ALLOWLIST = _env_bool("ACM_FETCH_REQUIRE_ALLOWLIST", False)
 
 # ================= 定时提醒 =================
 TZ_NAME = "Asia/Shanghai"
@@ -99,4 +125,8 @@ def check_config() -> None:
     if missing:
         raise RuntimeError(
             "缺少必要配置（请通过环境变量设置）: " + ", ".join(missing)
+        )
+    if FETCH_REQUIRE_ALLOWLIST and not FETCH_ALLOWED_DOMAINS:
+        raise RuntimeError(
+            "已设置 ACM_FETCH_REQUIRE_ALLOWLIST=1，但 ACM_FETCH_ALLOWED_DOMAINS 为空"
         )

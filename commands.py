@@ -22,6 +22,7 @@ import config
 import crawler
 import database as db
 import llm
+import security
 from fetcher import FetchError, fetch_text
 from utils import is_super_admin, is_teacher, parse_command
 
@@ -175,9 +176,10 @@ async def cmd_amend(group_id: str, sender: str, args: str) -> list[dict]:
         return [{"group_id": group_id, "text": f"修正失败：{e}"}]
     if not ok:
         return [{"group_id": group_id, "text": f"比赛 #{cid} 不存在，无法修正"}]
-    changed = "；".join(f"{k}={v}" for k, v in info.items())
-    msgs = [{"group_id": group_id, "text": f"已修正比赛「{comp['name']}」（#{cid}）：{changed}\n修正已生成版本记录"}]
-    msgs += _broadcast_to_groups(comp["name"], cid, f"比赛「{comp['name']}」（#{cid}）已被超管修正：{changed}", exclude=group_id)
+    changed = "；".join(f"{k}={security.single_line(v, 200)}" for k, v in info.items())
+    safe_name = security.single_line(comp["name"], 100)
+    msgs = [{"group_id": group_id, "text": f"已修正比赛「{safe_name}」（#{cid}）：{changed}\n修正已生成版本记录"}]
+    msgs += _broadcast_to_groups(safe_name, cid, f"比赛「{safe_name}」（#{cid}）已被超管修正：{changed}", exclude=group_id)
     return msgs
 
 
@@ -192,13 +194,16 @@ async def _amend_refetch(group_id: str, cid: int, comp: dict, rest: str) -> list
         return [{"group_id": group_id, "text": f"链接抓取失败：{e}"}]
     info, err = await llm.extract_contest(f"链接正文：{page}\n超管修正补充：{rest}")
     if err is not None or not info:
-        return [{"group_id": group_id, "text": f"信息提取失败：{err or '未知原因'}"}]
+        return [{"group_id": group_id, "text": (
+            f"信息提取失败：{security.single_line(err or '未知原因', 200)}"
+        )}]
     fields = {
         "name": info.get("name", ""),
         "official_reg_deadline": info.get("reg_deadline", ""),
         "official_time": info.get("contest_time", ""),
         "official_rules": info.get("raw_note", ""),
-        "official_site": info.get("source_link", "") or url,
+        # 来源链接只信服务端已抓取并校验过的 URL，模型无权改写。
+        "official_site": url,
     }
     try:
         ok = db.amend_competition(cid, fields, operator="super_admin", note=f"重新提取：{url}")
@@ -250,7 +255,10 @@ def cmd_collection_create(group_id: str, sender: str, args: str) -> list[dict]:
                                    capacity=capacity, fields=fields, operator=sender)
     except ValueError as e:
         return [{"group_id": group_id, "text": str(e)}]
-    return [{"group_id": group_id, "text": f"已发起征集 #{cid}：{title}（用 /报名 {cid} ... 报名，/征集汇总 {cid} 查看）"}]
+    return [{"group_id": group_id, "text": (
+        f"已发起征集 #{cid}：{security.single_line(title, 100)}"
+        f"（用 /报名 {cid} ... 报名，/征集汇总 {cid} 查看）"
+    )}]
 
 
 def cmd_collection_register(group_id: str, sender: str, args: str) -> list[dict]:
@@ -296,9 +304,9 @@ def cmd_collection_summary(group_id: str, sender: str, args: str) -> list[dict]:
     s = db.summarize_collection(cid)
     remaining = "不限" if s["remaining"] is None else str(s["remaining"])
     lines = [
-        f"征集：{s['title']}（{s['status']}）",
-        f"用途：{s['purpose'] or '-'}",
-        f"截止：{coll['deadline'] or '不限'}",
+        f"征集：{security.single_line(s['title'], 100)}（{s['status']}）",
+        f"用途：{security.single_line(s['purpose'] or '-', 200)}",
+        f"截止：{security.single_line(coll['deadline'] or '不限', 16)}",
         f"已报名：{s['registered']} 人",
         f"已取消：{s['cancelled']} 人",
         f"剩余名额：{remaining}",
@@ -311,8 +319,11 @@ def cmd_collection_summary(group_id: str, sender: str, args: str) -> list[dict]:
                 data = json.loads(r["data_json"] or "{}")
             except ValueError:
                 data = {}
-            extra = "；".join(f"{k}={v}" for k, v in data.items())
-            lines.append(f"{r['member_id']}｜{extra}")
+            extra = "；".join(
+                f"{security.single_line(k, 40)}={security.single_line(v, 100)}"
+                for k, v in data.items()
+            )
+            lines.append(f"{security.single_line(r['member_id'], 64)}｜{extra}")
     else:
         lines.append("暂无报名")
     return [{"group_id": group_id, "text": "\n".join(lines)}]
@@ -341,7 +352,11 @@ def cmd_org_events(group_id: str, sender: str, args: str) -> list[dict]:
     lines = ["学校统一安排："]
     for e in events:
         t = e["contest_time"] or e["reg_deadline"] or ""
-        lines.append(f"#{e['id']} {e['title']}｜{t}｜{e.get('location') or '地点待定'}")
+        lines.append(
+            f"#{e['id']} {security.single_line(e['title'], 100)}｜"
+            f"{security.single_line(t, 16)}｜"
+            f"{security.single_line(e.get('location') or '地点待定', 80)}"
+        )
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
 
@@ -353,7 +368,11 @@ def cmd_training_list(group_id: str, sender: str, args: str) -> list[dict]:
     for s in sessions:
         need = "（需带电脑）" if s["needs_laptop"] else ""
         lines.append(
-            f"#{s['id']} {s['title']}{need}｜{s['weekday']} {s['start_time']}-{s['end_time']}｜{s['location'] or '地点待定'}"
+            f"#{s['id']} {security.single_line(s['title'], 100)}{need}｜"
+            f"{security.single_line(s['weekday'], 20)} "
+            f"{security.single_line(s['start_time'], 16)}-"
+            f"{security.single_line(s['end_time'], 16)}｜"
+            f"{security.single_line(s['location'] or '地点待定', 80)}"
         )
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
@@ -378,7 +397,7 @@ def cmd_training_add(group_id: str, sender: str, args: str) -> list[dict]:
     info = {"title": title, "weekday": weekday, "start_time": start_time,
             "end_time": end_time, "location": location}
     tid = db.create_training_session(group_id, info, sender)
-    return [{"group_id": group_id, "text": f"已添加课程 #{tid}：{title}"}]
+    return [{"group_id": group_id, "text": f"已添加课程 #{tid}：{security.single_line(title, 100)}"}]
 
 
 def cmd_training_cancel(group_id: str, sender: str, args: str) -> list[dict]:
@@ -401,8 +420,10 @@ def cmd_faq_list(group_id: str, sender: str, args: str) -> list[dict]:
         return [{"group_id": group_id, "text": "本群暂无 FAQ" + ("（含关键词）" if keyword else "")}]
     lines = ["本群 FAQ："]
     for f in faqs:
-        lines.append(f"#{f['id']} Q：{f['question']}")
-        lines.append(f"   A：{f['answer']}")
+        lines.append(f"#{f['id']} Q：{security.single_line(f['question'], 200)}")
+        lines.append(
+            f"   A：{security.defang_notice_markers(security.normalize_untrusted(f['answer'], 1000))}"
+        )
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
 
@@ -449,7 +470,10 @@ def cmd_question_list(group_id: str, sender: str, args: str) -> list[dict]:
         return [{"group_id": group_id, "text": "暂无未答问题"}]
     lines = ["未答问题："]
     for q in items:
-        lines.append(f"#{q['id']} {q['question']}（提问者：{q['asker'] or '未知'}）")
+        lines.append(
+            f"#{q['id']} {security.single_line(q['question'], 500)}"
+            f"（提问者：{security.single_line(q['asker'] or '未知', 64)}）"
+        )
     lines.append("回答后请用 /FAQ添加 <问题> = <答案> 沉淀为 FAQ")
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
@@ -466,9 +490,12 @@ def cmd_fetch_status(group_id: str, sender: str, args: str) -> list[dict]:
     lines = ["公共来源抓取状态："]
     for s in sources:
         comp = db.get_competition(s["competition_id"])
-        name = comp["name"] if comp else f"#{s['competition_id']}"
+        name = security.single_line(comp["name"], 100) if comp else f"#{s['competition_id']}"
         st = s["last_status"] or "未抓取"
-        lines.append(f"#{s['id']} {name}｜{st}｜{s['last_fetched_at'] or '-'}｜{s['url'][:50]}")
+        lines.append(
+            f"#{s['id']} {name}｜{st}｜{s['last_fetched_at'] or '-'}｜"
+            f"{security.single_line(s['url'], 80)}"
+        )
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
 
@@ -481,7 +508,12 @@ def cmd_reminder_status(group_id: str, sender: str, args: str) -> list[dict]:
         return [{"group_id": group_id, "text": state + "\n本群当前无待发送提醒"}]
     lines = [state, "待发送提醒："]
     for d in pending[:20]:
-        lines.append(f"{d['obj_type']}#{d['obj_id']}｜{d['remind_type']}｜目标 {d['target_time']}｜已尝试 {d['attempts']} 次")
+        lines.append(
+            f"{security.single_line(str(d['obj_type']), 40)}#{d['obj_id']}｜"
+            f"{security.single_line(str(d['remind_type']), 40)}｜"
+            f"目标 {security.single_line(str(d['target_time']), 16)}｜"
+            f"已尝试 {d['attempts']} 次"
+        )
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
 
@@ -507,13 +539,24 @@ async def cmd_trigger_fetch(group_id: str, sender: str, args: str) -> list[dict]
         elif r["kind"] == "disabled":
             lines.append("自动抓取未开启（AUTO_FETCH_ENABLED=False）")
         elif r["kind"] == "auto_created":
-            lines.append(f"#{r['source_id']} 免审新建比赛：{r['name']}（id={r['competition_id']}，已 confirmed，未通知全员）")
+            lines.append(
+                f"#{r['source_id']} 免审新建比赛：{security.single_line(r['name'], 100)}"
+                f"（id={r['competition_id']}，已 confirmed，未通知全员）"
+            )
         elif r["kind"] == "pending_auto":
-            lines.append(f"#{r['source_id']} 有更新已存待审：{r['name']}（比赛 id={r['competition_id']}，更新 id={r['update_id']}，未通知全员）")
+            lines.append(
+                f"#{r['source_id']} 有更新已存待审：{security.single_line(r['name'], 100)}"
+                f"（比赛 id={r['competition_id']}，更新 id={r['update_id']}，未通知全员）"
+            )
         elif r["kind"] == "updated_auto":
-            lines.append(f"#{r['source_id']} 更新草稿比赛：{r['name']}（id={r['competition_id']}，未通知全员）")
+            lines.append(
+                f"#{r['source_id']} 更新草稿比赛：{security.single_line(r['name'], 100)}"
+                f"（id={r['competition_id']}，未通知全员）"
+            )
         else:
-            lines.append(f"#{r['source_id']} 异常：{r['error']}")
+            lines.append(
+                f"#{r['source_id']} 异常：{security.single_line(str(r.get('error') or ''), 200)}"
+            )
     return [{"group_id": group_id, "text": "\n".join(lines)}]
 
 
@@ -563,7 +606,9 @@ async def handle_command(text: str, group_id: str, sender: str) -> list[dict] | 
                 handler = h
                 break
     if handler is None:
-        return [{"group_id": group_id, "text": f"命令 /{cmd} 暂不支持，用 /帮助 查看所有命令"}]
+        return [{"group_id": group_id, "text": (
+            f"命令 /{security.single_line(cmd, 50)} 暂不支持，用 /帮助 查看所有命令"
+        )}]
     result = handler(group_id, sender, args)
     if asyncio.iscoroutine(result):
         result = await result
@@ -572,25 +617,48 @@ async def handle_command(text: str, group_id: str, sender: str) -> list[dict] | 
 
 def match_faq(group_id: str, text: str) -> dict | None:
     """在群 FAQ 中匹配问题：命中返回 FAQ 记录（含 id/question/answer），未命中返回 None。"""
+    # FAQ 入库时模板标记会被中和，匹配前对用户文本做同样处理，避免漏匹配。
+    text = security.defang_notice_markers(text)
     for faq in db.list_faq(group_id):
-        if faq["question"] in text:
+        question = security.defang_notice_markers(faq["question"])
+        if question in text:
             return faq
-        q_words = [w for w in faq["question"].replace("？", " ").replace("?", " ").split() if len(w) >= 2]
+        q_words = [
+            w for w in question.replace("？", " ").replace("?", " ").split()
+            if len(w) >= 2
+        ]
         if any(w in text for w in q_words):
             return faq
     return None
 
 
 async def handle_non_command_message(text: str, group_id: str, sender: str) -> list[dict]:
-    """非命令消息：FAQ 匹配 → 模型问答 → 模型不可用/无解时才收集为未答问题。"""
+    """非命令消息：FAQ 匹配 → 限流 → 模型问答 → 不可用/需老师确认时收集问题。"""
+    text = security.normalize_untrusted(text or "", config.LLM_MAX_INPUT_CHARS)
     faq = match_faq(group_id, text)
     if faq is not None:
-        return [{"group_id": group_id, "text": f"Q：{faq['question']}\nA：{faq['answer']}"}]
+        answer = security.defang_notice_markers(
+            security.normalize_untrusted(faq["answer"], 1000)
+        )
+        question = security.single_line(faq["question"], 200)
+        return [{"group_id": group_id, "text": f"Q：{question}\nA：{answer}"}]
+
+    allowed, reason = security.rate_limiter.allow(f"{group_id}:{sender}", text)
+    if not allowed:
+        security.log_security_event(
+            "rate_limited", rules=[reason], group_id=group_id, member_id=sender, text=text,
+        )
+        return [{"group_id": group_id, "text": security.RATE_LIMITED_TEXT}]
+
     try:
         answer = await llm.answer_question(text, db.list_question_contests(group_id))
     except Exception:  # noqa: BLE001
-        answer = "模型暂时不可用，请稍后再试~"
-    if answer.startswith("模型暂时不可用"):
+        answer = llm.MODEL_UNAVAILABLE_TEXT
+    if answer in (llm.MODEL_UNAVAILABLE_TEXT, security.HANDOFF_TEXT):
         qid = db.add_unanswered_question(group_id, text, sender)
         return [{"group_id": group_id, "text": f"收到，已记录为问题 #{qid}，老师看到后会回答"}]
+    if answer in (security.REFUSE_TEXT, security.GUARD_FAILED_TEXT, security.TOO_LONG_TEXT):
+        security.log_security_event(
+            "qa_rejected", group_id=group_id, member_id=sender, text=text,
+        )
     return [{"group_id": group_id, "text": answer}]

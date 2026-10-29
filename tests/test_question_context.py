@@ -1,6 +1,7 @@
 """比赛发布到问答上下文的离线回归测试，不访问真实 QQ、网页或模型。"""
 
 import json
+import re
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -56,10 +57,19 @@ def _public(name="正式校赛", **overrides):
     return info
 
 
+_ARCHIVE_RE = re.compile(r"<ARCHIVE_[0-9a-f]+>\n(.*?)\n</ARCHIVE_[0-9a-f]+>", re.S)
+
+
 def _prompt_contests(chat_call):
-    system = chat_call.args[0]
-    archive = system.rsplit("【存档数据】\n", 1)[1]
-    return json.JSONDecoder().raw_decode(archive)[0]
+    """从 user message 的随机 nonce 存档块中取出比赛上下文。"""
+    user = chat_call.args[1]
+    match = _ARCHIVE_RE.search(user)
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def _answer(text):
+    return json.dumps({"kind": "answer", "text": text}, ensure_ascii=False)
 
 
 async def test_published_competition_reaches_qa_model_in_allowed_groups(bot, monkeypatch):
@@ -71,8 +81,8 @@ async def test_published_competition_reaches_qa_model_in_allowed_groups(bot, mon
             "reg_deadline": "2026-11-10 23:59",
             "contest_time": "2026-11-20 09:00",
         }, ensure_ascii=False),
-        "报名截止是 2026-11-10 23:59。",
-        "比赛时间是 2026-11-20 09:00。",
+        _answer("报名截止是 2026-11-10 23:59。"),
+        _answer("比赛时间是 2026-11-20 09:00。"),
     ])
     monkeypatch.setattr(main, "fetch_text", fetch)
     monkeypatch.setattr(llm, "_chat_once", chat)
@@ -121,7 +131,7 @@ async def test_long_published_source_keeps_core_fields_and_next_competition(bot,
             "reg_deadline": "2026-11-12 23:59",
             "contest_time": "2026-11-22 09:00",
         }, ensure_ascii=False),
-        "两场比赛的信息均可查询。",
+        _answer("两场比赛的信息均可查询。"),
     ])
     monkeypatch.setattr(main, "fetch_text", fetch)
     monkeypatch.setattr(llm, "_chat_once", chat)
@@ -174,7 +184,7 @@ async def test_qa_prompt_excludes_drafts_pending_and_private_legacy(bot, monkeyp
     database.save_contest("g1", {"name": "本群旧记录"})
     database.save_contest("g2", {"name": "其他群私有记录"})
     database.save_contest("", {"name": "未归属记录"})
-    chat = AsyncMock(return_value="正式报名截止是 2026-11-10 23:59。")
+    chat = AsyncMock(return_value=_answer("正式报名截止是 2026-11-10 23:59。"))
     monkeypatch.setattr(llm, "_chat_once", chat)
 
     await client.on_group_at_message_create(_message("正式校赛什么时候截止？"))
@@ -185,6 +195,7 @@ async def test_qa_prompt_excludes_drafts_pending_and_private_legacy(bot, monkeyp
     formal = next(c for c in context if c["name"] == "正式校赛")
     assert formal["reg_deadline"] == "2026-11-10 23:59"
     assert "2026-12-01 23:59" not in chat.await_args.args[0]
+    assert "2026-12-01 23:59" not in chat.await_args.args[1]
 
 
 async def test_qa_reads_amended_formal_fields_instead_of_old_version(bot, monkeypatch):
@@ -196,7 +207,7 @@ async def test_qa_reads_amended_formal_fields_instead_of_old_version(bot, monkey
         "official_time": "2026-12-10 09:00",
         "official_site": "https://example.com/corrected",
     }, operator="admin")
-    chat = AsyncMock(return_value="已按修正后的正式信息回答。")
+    chat = AsyncMock(return_value=_answer("已按修正后的正式信息回答。"))
     monkeypatch.setattr(llm, "_chat_once", chat)
 
     await client.on_group_at_message_create(_message("修正校赛标题什么时候报名？"))

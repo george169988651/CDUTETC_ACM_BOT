@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import config
+import security
 from config import REMIND_BEFORE_HOURS, REMIND_TYPES, TZ_NAME
 from database import (
     get_delivery_by_key,
@@ -77,8 +78,10 @@ def build_reminders(contests: list[dict], now: datetime) -> list[dict]:
 
 def format_remind(item: dict) -> str:
     return (
-        f"【提醒】{item['name']} {item['label']}时间：{item['target_str']}\n"
-        f"形式：{item['mode'] or '待定'}  地点：{item['location'] or '待定'}\n"
+        f"【提醒】{security.single_line(item['name'], 100)} "
+        f"{item['label']}时间：{security.single_line(item['target_str'], 16)}\n"
+        f"形式：{security.single_line(item['mode'] or '待定', 40)}  "
+        f"地点：{security.single_line(item['location'] or '待定', 80)}\n"
         "请同学们做好准备，记得按时参加！"
     )
 
@@ -145,7 +148,8 @@ def build_general_reminders(collections: list[dict], competitions: list[dict],
                 "remind_type": "deadline",
                 "target_str": a["deadline"],
                 "text": (
-                    f"【提醒】征集「{a['title']}」报名截止：{a['deadline']}\n"
+                    f"【提醒】征集「{security.single_line(a['title'], 100)}」"
+                    f"报名截止：{security.single_line(a['deadline'], 16)}\n"
                     f"已报名同学请确认，未报名同学请抓紧（/报名 {a['id']} 报名）"
                 ),
             })
@@ -166,8 +170,10 @@ def build_general_reminders(collections: list[dict], competitions: list[dict],
                         "remind_type": kind,
                         "target_str": c[field],
                         "text": (
-                            f"【提醒】公共比赛「{c['name']}」{_LABELS[kind]}：{c[field]}\n"
-                            f"官网：{c.get('official_site') or '待定'}\n请同学们提前做好准备！"
+                            f"【提醒】公共比赛「{security.single_line(c['name'], 100)}」"
+                            f"{_LABELS[kind]}：{security.single_line(c[field], 16)}\n"
+                            f"官网：{security.single_line(c.get('official_site') or '待定', 500)}\n"
+                            "请同学们提前做好准备！"
                         ),
                     })
     return out

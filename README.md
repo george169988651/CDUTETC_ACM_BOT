@@ -72,10 +72,11 @@
 | `ACM_LLM_BASE_URL` | 否 | `https://api.deepseek.com/v1` | 大模型接口地址 |
 | `ACM_LLM_MODEL` | 否 | `deepseek-chat` | 模型名 |
 | `ACM_ALLOWED_GROUPS` | 否 | 空 | 允许服务的群 openid 列表（逗号分隔）。**未配置 = 不服务任何群** |
-| `ACM_PUBLISHER_WHITELIST` | 否 | 空 | 有权发布比赛的成员 openid 白名单。**未配置 = 不允许任何人发布** |
-| `ACM_TEACHER_WHITELIST` | 否 | 空 | 老师 openid 白名单（审核草稿/课程/FAQ/活动管理等）。**未配置 = 无任何老师权限** |
+| `ACM_SUPER_ADMIN` | 否 | 空 | 超管 openid 白名单（`/修正`、全局管理）。**未配置 = 无超管权限** |
+| `ACM_TEACHER_WHITELIST` | 否 | 空 | 老师 openid 白名单（发布比赛/课程/FAQ/征集管理等）。**未配置 = 无任何老师权限** |
 | `ACM_PUBLISH_CMD` | 否 | `发布` | 发布命令前缀 |
 | `ACM_FETCH_ALLOWED_DOMAINS` | 否 | 空 | 可抓取的域名白名单（逗号分隔，小写）；重定向目标同样校验。**强烈建议配置** |
+| `ACM_FETCH_REQUIRE_ALLOWLIST` | 否 | `0` | 设为 `1` 时启动强制要求抓取域名白名单非空，适合生产环境 |
 | `ACM_FETCH_MAX_BYTES` | 否 | `1000000` | 解压后响应体上限（字节） |
 | `ACM_FETCH_MAX_REDIRECTS` | 否 | `3` | 重定向跳数上限 |
 | `ACM_FETCH_TIMEOUT` | 否 | `10` | 连接 / 读取超时（秒） |
@@ -84,7 +85,20 @@
 | `ACM_FETCH_MIN_INTERVAL_MINUTES` | 否 | `60` | 公共来源最小抓取间隔（分钟），低频抓取控制 |
 | `ACM_LLM_MAX_INPUT_CHARS` | 否 | `6000` | 单次模型请求输入上限 |
 | `ACM_LLM_MAX_OUTPUT_TOKENS` | 否 | `2000` | 单次模型请求输出上限 |
+| `ACM_LLM_QA_MAX_TOKENS` | 否 | `600` | 问答输出上限 |
+| `ACM_LLM_EXTRACT_MAX_TOKENS` | 否 | `800` | 抽取输出上限 |
+| `ACM_LLM_TIMEOUT` | 否 | `30` | 模型请求超时（秒） |
 | `ACM_LLM_CONCURRENCY` | 否 | `2` | 模型并发请求上限 |
+| `ACM_SEC_ENABLED` | 否 | `1` | 输入风险分级开关；输出护栏始终生效 |
+| `ACM_SEC_RISK_BLOCK` | 否 | `5` | 风险分达到该值直接拒答（不调模型） |
+| `ACM_SEC_RISK_SANDBOX` | 否 | `2` | 风险分达到该值追加严格提示并记录事件 |
+| `ACM_SEC_LOG_EXCERPT` | 否 | `100` | 安全日志截断长度 |
+| `ACM_QA_MAX_QUESTION_CHARS` | 否 | `500` | 单条问答最大长度，超长直接提示精简 |
+| `ACM_QA_MAX_ANSWER_CHARS` | 否 | `800` | 回答发送前最大长度 |
+| `ACM_QA_RATE_PER_MINUTE` | 否 | `6` | 每个成员每分钟模型问答上限 |
+| `ACM_QA_RATE_PER_HOUR` | 否 | `40` | 每个成员每小时模型问答上限 |
+| `ACM_QA_DUP_WINDOW_SECONDS` | 否 | `600` | 相同问题去重窗口（秒） |
+| `ACM_QA_ALLOW_ARCHIVE_LINKS` | 否 | `1` | 是否允许回答复述存档中已有的链接 |
 | `ACM_REMIND_CHECK_INTERVAL_MINUTES` | 否 | `30` | 提醒检查周期（分钟） |
 | `ACM_REMIND_BEFORE_HOURS` | 否 | `24` | 提前多少小时提醒 |
 | `ACM_DB_PATH` | 否 | `./contests.db` | SQLite 数据库路径 |
@@ -99,14 +113,15 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-离线测试使用 mock、内存或隔离临时 SQLite，不依赖真实 QQ 账号、真实网络抓取与付费模型；覆盖权限默认拒绝、跨群隔离、草稿审核版本、旧库安全迁移、活动幂等登记/取消/容量/汇总、提醒去重与失败重试、变化检测与间隔控制、schema 校验失败不写库、SDK 消息回执与跨群通知路由等场景。
+离线测试使用 mock、内存或隔离临时 SQLite，不依赖真实 QQ 账号、真实网络抓取与付费模型；覆盖权限默认拒绝、跨群隔离、草稿审核版本、旧库安全迁移、活动幂等登记/取消/容量/汇总、提醒去重与失败重试、变化检测与间隔控制、schema 校验失败不写库、SDK 消息回执与跨群通知路由，以及提示词注入、伪造通知、链接白名单、隐藏文本清理、限流与字段上限等场景。
 
 ## 安全与健壮性设计
 
-- **权限默认全拒绝**：群白名单、发布者白名单、老师白名单未配置时均不开放；身份一律取自 SDK 事件字段（`group_openid` / `member_openid`），不信消息正文中的身份声明；老师身份判断走 `ACM_TEACHER_WHITELIST`，未配置则所有 `/审核通过`、`/活动创建` 等命令拒绝执行。
+- **权限默认全拒绝**：群白名单、超管白名单、老师白名单未配置时均不开放；身份一律取自 SDK 事件字段（`group_openid` / `member_openid`），不信消息正文中的身份声明；未配置老师/超管白名单时，发布、`/修正`、征集管理等命令全部拒绝执行。
 - **SSRF 防护**：仅支持无账号密码的 http/https；每次连接前解析并校验目标主机全部地址（拒绝回环 / 私网 / 链路本地 / 保留 / 组播 / 未指定，IPv4+IPv6）；socket 直连已校验 IP，规避 DNS 重绑定；手动逐跳跟随重定向并重新校验；可选域名白名单。
 - **资源限制**：响应体按 Content-Length 提前拒绝 + 流式读取上限 + gzip 边解压边限流；正文、模型输入/输出、并发均有上限。
-- **数据校验**：模型提取结果严格结构校验（名称必填、时间合法并归一化）；**校验失败不写库、不回复成功**；公共来源提取结果映射后再次经 `create_competition`/`update_competition` 严格 schema 校验，失败只记来源 error、不生成草稿。
+- **数据校验**：模型提取结果严格结构校验（名称必填、时间合法并归一化、字段单行限长）；**校验失败不写库、不回复成功**；公共来源提取结果映射后再次经 `create_competition`/`update_competition` 严格 schema 校验，失败只记来源 error、不生成草稿；来源链接只接受无凭据 http/https，且永远由服务端填写，不采用模型返回值。
+- **提示词注入防护**：模型没有工具、不会直接写库或执行命令；system 只放静态规则，网页正文、用户问题和存档用每次随机 nonce 包裹后放入 user message；问答只接受 `{"kind","text"}` JSON 信封，输出前再经护栏（提示词回显、行首伪造通知、存档内链接白名单、长度与控制字符）；输入做全角字母数字/零宽/控制字符归一化、风险分级和按成员限流；抓取层删除 HTML 注释与视觉隐藏元素，避免“对人不可见、对模型可见”的注入。
 - **时区统一**：业务时间统一北京时间 `Asia/Shanghai`（zoneinfo），UTC 主机同样按北京时区计算，格式 `YYYY-MM-DD HH:MM`。
 - **提醒去重**：去重键含群号并持久化在 `reminder_deliveries`；**发送成功才标记 sent**，失败留 pending 自动重试（attempts 计数），不拿日志冒充已发送。
 - **公共抓取**：集中低频调度（`FETCH_MIN_INTERVAL_MINUTES`）；ETag / Last-Modified / 正文哈希三层变化检测，以正文哈希为强信号；**仅实质变化才调用一次模型**生成审核草稿；已确认比赛被实质变化打回草稿需重新审核；订阅群与来源异常均返回通知目标，由发送回调统一处理。
@@ -115,7 +130,7 @@ python -m pytest -q
 
 - **未完成真实 QQ 联调**：所有行为验证均基于离线测试；真实群的消息格式、@ 解析、回复链路、审核与登记交互尚未实测，可能暴露平台差异。
 - **主动通知待真实联调**：真实发送接口已接入，默认关闭；平台未授权、接收群拒绝、机器人离线或频控均可能导致发送失败，反馈以接口回执为准。
-- **模型提取可能幻觉**：草稿由大模型从抓取正文提取生成，字段可能不准确；老师审核通过前成员不可见，但提取错误仍可能误导审核。
+- **模型提取可能幻觉**：v2 免审发布直接进入 confirmed，提取字段可能不准确并进入群通知与问答上下文；提示词防护只防注入/越权输出，不验证事实，时间和来源仍需老师核对。
 - **旧库记录归属为空**：旧版 `contests` 表迁移后旧记录不归属任何群、不参与提醒，需管理员人工按需迁移。
 - **老师身份手工配置**：老师白名单基于 SDK `member_openid`，需部署时手工收集 openid 填入 `ACM_TEACHER_WHITELIST`，暂不支持自动识别群管理员。
 
@@ -137,9 +152,10 @@ python -m pytest -q
 ```
 config.py        配置与环境变量解析、启动前校验（密钥不进日志）
 utils.py         文本解析与权限判断（纯函数）
-database.py      SQLite 存取、三层数据模型、群订阅关联、按群隔离、旧库迁移、提醒去重
-fetcher.py       带 SSRF 防护与资源限制的抓取层
-llm.py           大模型提取与问答、结果校验、限量
+database.py      SQLite 存取、三层数据模型、群订阅关联、按群隔离、旧库迁移、提醒去重、字段限长
+security.py      提示词注入防护：文本清洗、风险分级、限流、输出护栏、URL 校验
+fetcher.py       带 SSRF 防护与资源限制的抓取层（含隐藏文本清理）
+llm.py           大模型提取与问答、静态提示词、nonce 包裹、JSON 信封、结果校验
 reminder.py      时区统一的提醒检查与持久化去重/重试
 crawler.py       公共来源低频抓取、变化检测、草稿生成、订阅群通知
 commands.py      斜杠命令分发（阶段二/三/四全部命令）

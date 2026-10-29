@@ -22,9 +22,10 @@ import ssl
 import zlib
 from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 import config
+import security
 
 logger = logging.getLogger(__name__)
 
@@ -280,11 +281,24 @@ def _extract_text(body: bytes, content_type: str, source_url: str) -> str:
     text = body.decode("utf-8", errors="replace")
     if ctype in ("text/html", "application/xhtml+xml"):
         soup = BeautifulSoup(text, "html.parser")
-        for tag in soup(["script", "style", "noscript", "iframe"]):
+        for tag in soup(["script", "style", "noscript", "iframe", "template", "svg"]):
             tag.decompose()
+        # HTML 注释和视觉隐藏元素对人不可见，却会进入模型上下文：
+        # 攻击者常把注入指令放在这里，必须在提取正文前删除。
+        for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+            comment.extract()
+        for tag in soup.find_all(True):
+            style = "".join(str(tag.get("style") or "").lower().split())
+            classes = " ".join(tag.get("class") or []).lower().split()
+            aria_hidden = str(tag.get("aria-hidden") or "").lower() == "true"
+            class_hidden = bool(
+                set(classes) & {"hidden", "sr-only", "visually-hidden", "invisible"}
+            )
+            if (tag.has_attr("hidden") or aria_hidden or class_hidden
+                    or "display:none" in style or "visibility:hidden" in style):
+                tag.decompose()
         text = soup.get_text("\n", strip=True)
-    if len(text) > config.FETCH_TEXT_LIMIT:
-        text = text[: config.FETCH_TEXT_LIMIT]
+    text = security.normalize_untrusted(text, config.FETCH_TEXT_LIMIT)
     logger.info("抓取成功: %s（%d 字符）", source_url, len(text))
     return text
 

@@ -25,6 +25,7 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import security
 from config import DB_PATH
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -349,13 +350,14 @@ def save_contest(group_id: str, info: dict) -> int:
     """写入一条群级比赛记录，返回新记录 id。字段必须是字符串，否则抛 ValueError。"""
     values = (
         group_id.strip(),
-        _as_str(info.get("name")),
-        _as_str(info.get("reg_deadline") or ""),
-        _as_str(info.get("contest_time") or ""),
-        _as_str(info.get("mode") or ""),
-        _as_str(info.get("location") or ""),
-        _as_str(info.get("source_link") or ""),
-        _as_str(info.get("raw_note") or ""),
+        security.single_line(_as_str(info.get("name")), 100),
+        security.single_line(_as_str(info.get("reg_deadline") or ""), 16),
+        security.single_line(_as_str(info.get("contest_time") or ""), 16),
+        security.single_line(_as_str(info.get("mode") or ""), 40),
+        security.single_line(_as_str(info.get("location") or ""), 80),
+        security.clean_url(_as_str(info.get("source_link") or "")),
+        security.defang_notice_markers(security.normalize_untrusted(
+            _as_str(info.get("raw_note") or ""), 1000)),
         now_str(),
     )
     with _connect() as conn:
@@ -493,19 +495,51 @@ _COMPETITION_COLS = (
 
 
 def _clean_competition_info(info: dict) -> dict:
-    """清洗公共比赛字段：name 必填，时间字段统一格式，其余字符串。"""
-    name = _as_str(info.get("name"))
+    """清洗公共比赛字段：name 必填，时间字段统一格式，其余字符串。
+
+    名称/形式等会进入群通知的字段强制单行并限长；来源链接只接受
+    无凭据的 http/https，防止模型或网页把任意 URL 写成官网。
+    """
+    name = security.single_line(_as_str(info.get("name")), 100)
     if not name:
         raise ValueError("比赛名称不能为空")
-    cleaned = {"name": name}
-    for field in (
-        "edition", "official_site", "tracks", "official_rules",
-        "device_req", "summary",
-    ):
-        cleaned[field] = _as_str(info.get(field) or "")
+    cleaned = {
+        "name": name,
+        "edition": security.single_line(_as_str(info.get("edition") or ""), 50),
+        "official_site": security.clean_url(_as_str(info.get("official_site") or "")),
+        "tracks": security.single_line(_as_str(info.get("tracks") or ""), 200),
+        "official_rules": security.defang_notice_markers(security.normalize_untrusted(
+            _as_str(info.get("official_rules") or ""), 1000)),
+        "device_req": security.single_line(_as_str(info.get("device_req") or ""), 200),
+        "summary": security.defang_notice_markers(security.normalize_untrusted(
+            _as_str(info.get("summary") or ""), 500)),
+    }
     for field in ("official_reg_start", "official_reg_deadline", "official_time"):
         cleaned[field] = _clean_time(info.get(field))
     return cleaned
+
+
+_COMPETITION_SINGLE_LIMITS = {"edition": 50, "tracks": 200, "device_req": 200}
+_COMPETITION_MULTILINE_LIMITS = {"official_rules": 1000, "summary": 500}
+
+
+def _clean_competition_field(field: str, value) -> str:
+    """单个公共比赛字段的清洗规则（创建/更新/修正共用）。"""
+    if field == "name":
+        name = security.single_line(_as_str(value), 100)
+        if not name:
+            raise ValueError("比赛名称不能为空")
+        return name
+    if field in ("official_reg_start", "official_reg_deadline", "official_time"):
+        return _clean_time(value)
+    if field == "official_site":
+        return security.clean_url(_as_str(value or ""))
+    if field in _COMPETITION_SINGLE_LIMITS:
+        return security.single_line(_as_str(value or ""), _COMPETITION_SINGLE_LIMITS[field])
+    if field in _COMPETITION_MULTILINE_LIMITS:
+        return security.defang_notice_markers(security.normalize_untrusted(
+            _as_str(value or ""), _COMPETITION_MULTILINE_LIMITS[field]))
+    return _as_str(value or "")
 
 
 def _row_to_competition(r: sqlite3.Row) -> dict:
@@ -626,15 +660,7 @@ def update_competition(cid: int, info: dict, operator: str = "", note: str = "")
     for field in info:
         if field not in allowed:
             raise ValueError(f"不支持的字段：{field}")
-        if field == "name":
-            name = _as_str(info[field])
-            if not name:
-                raise ValueError("比赛名称不能为空")
-            cleaned[field] = name
-        elif field in ("official_reg_start", "official_reg_deadline", "official_time"):
-            cleaned[field] = _clean_time(info[field])
-        else:
-            cleaned[field] = _as_str(info[field] or "")
+        cleaned[field] = _clean_competition_field(field, info[field])
     cols = list(cleaned)
     if not cols:
         return False
@@ -741,7 +767,7 @@ def _row_to_source(r: sqlite3.Row) -> dict:
 def add_competition_source(cid: int, url: str,
                            conn: sqlite3.Connection | None = None) -> int:
     """为公共比赛添加来源 URL（同 URL 唯一，重复返回已存在 id）。"""
-    url = _as_str(url)
+    url = security.clean_url(_as_str(url))
     if not url:
         raise ValueError("来源 URL 不能为空")
     sql_ins = (
@@ -808,7 +834,7 @@ def list_sources(competition_id: int | None = None) -> list[dict]:
 def create_published_competition(info: dict, source_url: str, source_text: str,
                                 operator: str = "") -> int:
     """同事务发布正式比赛、登记来源并保存已抓取正文的变化检测基线。"""
-    source_url = _as_str(source_url)
+    source_url = security.clean_url(_as_str(source_url))
     if not source_url:
         raise ValueError("来源 URL 不能为空")
     if not isinstance(source_text, str):
@@ -849,18 +875,19 @@ def _row_to_org_event(r: sqlite3.Row) -> dict:
 
 def create_org_event(info: dict, operator: str = "") -> int:
     """创建学校/集训队统一安排。title 必填，时间字段统一格式。"""
-    title = _as_str(info.get("title"))
+    title = security.single_line(_as_str(info.get("title")), 100)
     if not title:
         raise ValueError("安排标题不能为空")
     values = (
         title,
-        _as_str(info.get("event_type") or ""),
+        security.single_line(_as_str(info.get("event_type") or ""), 40),
         _clean_time(info.get("reg_deadline")),
         _clean_time(info.get("contest_time")),
-        _as_str(info.get("location") or ""),
-        _as_str(info.get("teacher") or ""),
-        _as_str(info.get("note") or ""),
-        _as_str(info.get("source") or ""),
+        security.single_line(_as_str(info.get("location") or ""), 80),
+        security.single_line(_as_str(info.get("teacher") or ""), 64),
+        security.defang_notice_markers(
+            security.normalize_untrusted(_as_str(info.get("note") or ""), 1000)),
+        security.single_line(_as_str(info.get("source") or ""), 200),
         _as_str(info.get("status") or "draft"),
         1 if info.get("shareable") else 0,
         _clean_time(info.get("effective_start")),
@@ -966,19 +993,19 @@ def _row_to_training(r: sqlite3.Row) -> dict:
 def create_training_session(group_id: str, info: dict, operator: str = "") -> int:
     """创建群内课程/训练安排。group_id 必填。"""
     group_id = _as_str(group_id)
-    title = _as_str(info.get("title") or "")
+    title = security.single_line(_as_str(info.get("title") or ""), 100)
     if not title:
         title = f"训练安排 {now_str()[:10]}"
     values = (
         group_id, title,
-        _as_str(info.get("weekday") or ""),
-        _as_str(info.get("start_time") or ""),
-        _as_str(info.get("end_time") or ""),
-        _as_str(info.get("location") or ""),
+        security.single_line(_as_str(info.get("weekday") or ""), 20),
+        security.single_line(_as_str(info.get("start_time") or ""), 16),
+        security.single_line(_as_str(info.get("end_time") or ""), 16),
+        security.single_line(_as_str(info.get("location") or ""), 80),
         1 if info.get("needs_laptop") else 0,
-        _as_str(info.get("software") or ""),
-        _as_str(info.get("device_req") or ""),
-        _as_str(info.get("training_group") or ""),
+        security.single_line(_as_str(info.get("software") or ""), 200),
+        security.single_line(_as_str(info.get("device_req") or ""), 200),
+        security.single_line(_as_str(info.get("training_group") or ""), 100),
         _clean_time(info.get("effective_start")),
         _clean_time(info.get("effective_end")),
         _as_str(info.get("status") or "confirmed"),
@@ -1050,8 +1077,10 @@ def _row_to_faq(r: sqlite3.Row) -> dict:
 
 def add_faq(group_id: str, question: str, answer: str, source: str = "",
             operator: str = "") -> int:
-    question = _as_str(question)
-    answer = _as_str(answer)
+    question = security.single_line(_as_str(question), 200)
+    answer = security.defang_notice_markers(
+        security.normalize_untrusted(_as_str(answer), 1000)
+    )
     if not question or not answer:
         raise ValueError("FAQ 的问题与答案都不能为空")
     with _connect() as conn:
@@ -1112,7 +1141,7 @@ def _row_to_unanswered(r: sqlite3.Row) -> dict:
 
 
 def add_unanswered_question(group_id: str, question: str, asker: str = "") -> int:
-    question = _as_str(question)
+    question = security.single_line(_as_str(question), 500)
     if not question:
         raise ValueError("问题不能为空")
     with _connect() as conn:
@@ -1174,12 +1203,15 @@ def create_collection(group_id: str, title: str, purpose: str = "", deadline: st
                       operator: str = "") -> int:
     """发起征集（报名意向/设备借用/出勤等）。capacity=None 表示不限。"""
     group_id = _as_str(group_id)
-    title = _as_str(title)
+    title = security.single_line(_as_str(title), 100)
     if not title:
         raise ValueError("征集标题不能为空")
     fields = fields or []
     if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
         raise ValueError("登记字段必须是字符串列表")
+    if len(fields) > 20:
+        raise ValueError("登记字段不能超过 20 个")
+    fields = [security.single_line(f, 50) for f in fields if security.single_line(f, 50)]
     deadline = _clean_time(deadline)
     capacity = _as_int(capacity)
     with _connect() as conn:
@@ -1188,7 +1220,8 @@ def create_collection(group_id: str, title: str, purpose: str = "", deadline: st
             " created_by, status, fields_json, created_at, updated_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
-                group_id, title, _as_str(purpose or ""), deadline, capacity,
+                group_id, title,
+                security.single_line(_as_str(purpose or ""), 200), deadline, capacity,
                 _as_str(operator or ""), "open",
                 json.dumps(fields, ensure_ascii=False), now_str(), now_str(),
             ),
@@ -1295,10 +1328,10 @@ def register_collection(cid: int, group_id: str, member_id: str,
     cleaned: dict[str, str] = {}
     for key, value in data.items():
         if declared and key not in declared:
-            return False, f"该征集不支持字段：{key}"
+            return False, f"该征集不支持字段：{security.single_line(key, 50)}"
         if not isinstance(value, str):
             return False, f"字段 {key} 应为文本"
-        cleaned[key] = value.strip()
+        cleaned[key] = security.single_line(value, 200)
 
     with _connect() as conn:
         row = conn.execute(
@@ -1429,15 +1462,7 @@ def amend_competition(cid: int, info: dict, operator: str = "", note: str = "") 
     for field in info:
         if field not in allowed:
             raise ValueError(f"不支持的字段：{field}")
-        if field == "name":
-            name = _as_str(info[field])
-            if not name:
-                raise ValueError("比赛名称不能为空")
-            cleaned[field] = name
-        elif field in ("official_reg_start", "official_reg_deadline", "official_time"):
-            cleaned[field] = _clean_time(info[field])
-        else:
-            cleaned[field] = _as_str(info[field] or "")
+        cleaned[field] = _clean_competition_field(field, info[field])
     cols = list(cleaned)
     if not cols:
         return False
@@ -1627,6 +1652,11 @@ def migrate_contest_to_competition(contest_id: int, group_id: str,
         if row is None:
             return None
         contest = _row_to_contest(row)
+        # 旧库可能存有不规范链接：迁移时丢弃非法 URL，而不是让整次迁移失败。
+        try:
+            source_url = security.clean_url(contest["source_link"])
+        except ValueError:
+            source_url = ""
         comp_id = _create_competition_on(
             conn,
             {
@@ -1635,13 +1665,13 @@ def migrate_contest_to_competition(contest_id: int, group_id: str,
                 "official_time": contest["contest_time"],
                 "official_rules": contest["raw_note"],
                 "summary": contest["raw_note"],
-                "official_site": contest["source_link"],
+                "official_site": source_url,
             },
             status="draft",
             operator=operator,
         )
-        if contest["source_link"]:
-            add_competition_source(comp_id, contest["source_link"], conn=conn)
+        if source_url:
+            add_competition_source(comp_id, source_url, conn=conn)
         conn.execute(
             "UPDATE contests SET group_id = ? WHERE id = ?",
             (group_id, contest_id),
@@ -1682,17 +1712,26 @@ def add_pending_update(competition_id: int, fields: dict, *,
     """
     if not isinstance(fields, dict):
         raise ValueError("待审更新内容必须是字典")
+    # 待审内容同样来自网页/模型，写入前按正式字段规则清洗；
+    # 未知字段直接丢弃，避免把任意 JSON 存进待审区。
+    cleaned = {
+        field: _clean_competition_field(field, value)
+        for field, value in fields.items()
+        if field in _COMPETITION_FIELDS
+    }
+    change_note = security.single_line(_as_str(change_note or ""), 200)
+    created_by = security.single_line(_as_str(created_by or ""), 100)
     with _connect() as conn:
         row = conn.execute(
             "SELECT id FROM competition_pending_updates WHERE competition_id = ?",
             (competition_id,),
         ).fetchone()
-        fields_json = json.dumps(fields, ensure_ascii=False)
+        fields_json = json.dumps(cleaned, ensure_ascii=False)
         if row is not None:
             conn.execute(
                 "UPDATE competition_pending_updates SET fields_json = ?, source_id = ?,"
                 " change_note = ?, created_by = ?, updated_at = ? WHERE id = ?",
-                (fields_json, source_id, change_note or "", created_by or "",
+                (fields_json, source_id, change_note, created_by,
                  now_str(), row[0]),
             )
             return row[0]
@@ -1700,8 +1739,8 @@ def add_pending_update(competition_id: int, fields: dict, *,
             "INSERT INTO competition_pending_updates (competition_id, fields_json,"
             " source_id, change_note, created_by, created_at, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (competition_id, fields_json, source_id, change_note or "",
-             created_by or "", now_str(), now_str()),
+            (competition_id, fields_json, source_id, change_note,
+             created_by, now_str(), now_str()),
         )
         return cur.lastrowid
 

@@ -19,6 +19,7 @@
   - 新增定时任务：on_ready 里 self.sched.add_job(...)
 """
 
+import asyncio
 import contextvars
 import logging
 from datetime import datetime, timedelta
@@ -32,6 +33,7 @@ import commands
 import config
 import crawler
 import database as db
+import security
 from database import create_competition, create_published_competition, init_db
 from fetcher import FetchError, fetch_text
 from llm import extract_contest
@@ -76,13 +78,14 @@ def _notification_summary(sent: int, total: int) -> str:
 
 
 def _build_confirm(info: dict) -> str:
-    """构造存档成功后的确认回复。"""
+    """构造存档成功后的确认回复；旧库脏数据也在展示层强制单行。"""
     return (
         "比赛信息已记录~\n"
-        f"比赛：{info.get('name') or '未知'}\n"
-        f"报名截止：{info.get('reg_deadline') or '待定'}\n"
-        f"比赛时间：{info.get('contest_time') or '待定'}\n"
-        f"形式/地点：{info.get('mode') or '待定'} {info.get('location') or ''}\n"
+        f"比赛：{security.single_line(info.get('name') or '未知', 100)}\n"
+        f"报名截止：{security.single_line(info.get('reg_deadline') or '待定', 16)}\n"
+        f"比赛时间：{security.single_line(info.get('contest_time') or '待定', 16)}\n"
+        f"形式/地点：{security.single_line(info.get('mode') or '待定', 40)} "
+        f"{security.single_line(info.get('location') or '', 80)}\n"
         "有问题随时 @ 我！"
     )
 
@@ -229,9 +232,10 @@ class ACMBot(botpy.Client):
 
         info, err = await extract_contest(f"链接正文：{page}\n老师原文补充：{text}")
         if err is not None or not info:
+            safe_err = security.single_line(err or "未知原因", 200)
             await self._safe_reply(
                 message,
-                f"信息提取失败：{err or '未知原因'}。"
+                f"信息提取失败：{safe_err}。"
                 "可以直接告诉我：比赛名称、报名截止/比赛时间（YYYY-MM-DD HH:MM）、形式、地点~",
             )
             return
@@ -260,9 +264,9 @@ class ACMBot(botpy.Client):
         # 被动回复有有效期，先告知已提交存档，再等待各群通知结果。
         await self._safe_reply(message, _build_confirm(info) + "\n已免审发布为正式比赛。")
         notice = (
-            f"【新比赛发布】{info.get('name') or '未知'}\n"
-            f"报名截止：{info.get('reg_deadline') or '待定'}\n"
-            f"比赛时间：{info.get('contest_time') or '待定'}\n"
+            f"【新比赛发布】{security.single_line(info.get('name') or '未知', 100)}\n"
+            f"报名截止：{security.single_line(info.get('reg_deadline') or '待定', 16)}\n"
+            f"比赛时间：{security.single_line(info.get('contest_time') or '待定', 16)}\n"
             f"来源：{url}\n请及时查看并准备报名~"
         )
         targets = sorted(config.ALLOWED_GROUPS)
@@ -386,6 +390,12 @@ class ACMBot(botpy.Client):
 def run_bot() -> None:
     """启动入口：配置检查 → 构造客户端（Intents）→ run(appid=, secret=)。"""
     config.check_config()
+    # botpy.Client.__init__ 会调用 asyncio.get_event_loop()；Python 3.14
+    # 不再隐式创建事件循环，这里先显式设置一个，避免启动即报错。
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     intents = botpy.Intents(public_messages=True)
     bot = ACMBot(intents=intents)
     bot.run(appid=config.APPID, secret=config.APP_SECRET)
