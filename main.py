@@ -2,7 +2,7 @@
 
 职责：连接 QQ 官方机器人，路由群消息：
   - 命令式操作（/修正、/征集、/报名、/征集汇总、/征集关闭 等）→ commands 模块分发
-  - 「发布 <链接/信息>」命令（老师白名单）→ 抓取 → 提取 → 免审 confirmed → @全体通知
+  - 「发布 <链接/信息>」命令（老师白名单）→ 抓取 → 提取 → 免审 confirmed → 群通知
   - 非命令消息 → FAQ 自动回复；未命中则收集为未答问题
   - 周期提醒：比赛临近 + 征集登记截止 + 训练开始
   - 周期抓取：公共来源低频抓取（默认关闭）+ 变化检测 + 免审记录（不通知全员）
@@ -11,14 +11,15 @@
 安全要点：
   - 群与发布者白名单默认全拒绝；权限校验先于抓取/调模型/写库。
   - 身份一律取自 SDK 事件字段（group_openid / member_openid），不信消息正文。
-  - 提醒/抓取通知按平台权限接入：当前未申请到主动消息权限时为日志模式，
-    回调返回 False，不标记去重（不会拿日志冒充已发送）。
+  - 主动消息由显式开关控制；仅 QQ 返回有效消息 id 才确认发送成功。
+  - 跨群通知按目标群路由，发送失败不标记去重，也不声称已通知成功。
 
 扩展指南：
   - 新增消息指令：commands.py 的 handlers 表里加分支
   - 新增定时任务：on_ready 里 self.sched.add_job(...)
 """
 
+import contextvars
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -48,6 +49,30 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("main")
+_reply_sequence = contextvars.ContextVar("qq_reply_sequence", default=0)
+
+
+def _message_sent(result) -> bool:
+    """SDK 超时可能返回 None；只有有效消息回执才算成功。"""
+    return (
+        isinstance(result, dict)
+        and isinstance(result.get("id"), str)
+        and bool(result["id"].strip())
+        and result.get("code") in (None, 0)
+    )
+
+
+def _notification_summary(sent: int, total: int) -> str:
+    if not config.GROUP_ACTIVE_MESSAGES_ENABLED and sent == 0:
+        return "群通知未发送：主动群消息未启用，请联系管理员。"
+    if sent == total:
+        return f"群通知已发送：{sent}/{total} 个目标群。"
+    if sent == 0:
+        return f"群通知未确认发送：0/{total} 个目标群，请管理员检查平台权限或限额。"
+    return (
+        f"群通知已发送：{sent}/{total} 个目标群；"
+        f"其余 {total - sent} 个群未确认发送，请管理员检查平台权限或限额。"
+    )
 
 
 def _build_confirm(info: dict) -> str:
@@ -115,6 +140,7 @@ class ACMBot(botpy.Client):
     # ---------- 群消息路由 ----------
 
     async def on_group_at_message_create(self, message: GroupMessage):
+        reply_token = _reply_sequence.set(0)
         try:
             group_id = (
                 getattr(message, "group_openid", None)
@@ -133,12 +159,25 @@ class ACMBot(botpy.Client):
             replies = await commands.handle_command(text, group_id, member_id)
             if replies is None:
                 replies = await commands.handle_non_command_message(text, group_id, member_id)
+            cross_sent = 0
+            cross_total = 0
             for reply in replies:
-                if reply.get("text"):
+                if not reply.get("text"):
+                    continue
+                target_group = reply.get("group_id", group_id)
+                if target_group == group_id:
                     await self._safe_reply(message, reply["text"])
+                else:
+                    cross_total += 1
+                    if await self._send_group(target_group, reply["text"]):
+                        cross_sent += 1
+            if cross_total:
+                await self._safe_reply(message, _notification_summary(cross_sent, cross_total))
         except Exception:
             logger.exception("处理群消息失败")
             await self._safe_reply(message, "出错了，稍后再试试~")
+        finally:
+            _reply_sequence.reset(reply_token)
 
     # ---------- 内部处理 ----------
 
@@ -167,7 +206,7 @@ class ACMBot(botpy.Client):
 
     async def _handle_publish(self, message: GroupMessage, text: str,
                               group_id: str, member_id: str):
-        """发布命令（v2 免审）：老师权限校验 → 抓取 → 提取 → 校验 → confirmed → @全体通知。"""
+        """发布命令：老师权限校验 → 抓取 → 提取 → 校验 → confirmed → 群通知。"""
         if not is_teacher(member_id):
             await self._safe_reply(message, "抱歉，你没有发布比赛信息的权限~")
             return
@@ -218,43 +257,73 @@ class ACMBot(botpy.Client):
             return
 
         logger.info("已免审发布比赛: %s（群 %s）", info.get("name"), group_id)
-        await self._safe_reply(
-            message,
-            _build_confirm(info) + "\n已免审发布为正式比赛，并已尝试向全部允许群发送通知。",
-        )
-        # 全员通知：主动消息权限未开通时为日志模式，如实标注不冒充已发送
+        # 被动回复有有效期，先告知已提交存档，再等待各群通知结果。
+        await self._safe_reply(message, _build_confirm(info) + "\n已免审发布为正式比赛。")
         notice = (
             f"【新比赛发布】{info.get('name') or '未知'}\n"
             f"报名截止：{info.get('reg_deadline') or '待定'}\n"
             f"比赛时间：{info.get('contest_time') or '待定'}\n"
             f"来源：{url}\n请及时查看并准备报名~"
         )
-        for gid in sorted(config.ALLOWED_GROUPS):
-            await self._send_group_log_only(gid, notice)
+        targets = sorted(config.ALLOWED_GROUPS)
+        sent = 0
+        for gid in targets:
+            if await self._send_group(gid, notice):
+                sent += 1
+        await self._safe_reply(message, _notification_summary(sent, len(targets)))
 
-    async def _safe_reply(self, message: GroupMessage, content: str):
-        """回复失败也不影响主流程。"""
+    async def _safe_reply(self, message: GroupMessage, content: str) -> bool:
+        """被动回复：每个事件内递增 msg_seq，失败不影响其他消息。"""
+        group_id = getattr(message, "group_openid", None) or getattr(message, "group_id", None)
+        if not is_allowed_group(group_id, config.ALLOWED_GROUPS) or not getattr(message, "id", None):
+            return False
+        sequence = _reply_sequence.get() + 1
+        if sequence > 5:
+            logger.warning("源群消息的被动回复次数已达到平台上限（群 %s）", group_id)
+            return False
+        _reply_sequence.set(sequence)
         try:
-            await message.reply(content=content)
-        except Exception:
-            logger.exception("回复消息失败")
+            result = await message.reply(content=content, msg_type=0, msg_seq=sequence)
+        except Exception as e:
+            logger.warning("回复消息失败（群 %s）：%s", group_id, type(e).__name__)
+            return False
+        if not _message_sent(result):
+            logger.warning("回复消息未收到有效发送回执（群 %s）", group_id)
+            return False
+        return True
 
     # ---------- 定时任务回调 ----------
 
-    async def _send_group_log_only(self, group_id: str, text: str) -> bool:
-        """主动消息发送回调（日志模式）。
+    async def _send_group(self, group_id: str, text: str) -> bool:
+        """向允许群发送主动文本消息，仅有效 QQ 消息回执确认成功。"""
+        if not is_allowed_group(group_id, config.ALLOWED_GROUPS) or not text:
+            return False
+        if not config.GROUP_ACTIVE_MESSAGES_ENABLED:
+            logger.info("主动群消息未启用，跳过群 %s 的通知", group_id)
+            return False
+        try:
+            result = await self.api.post_group_message(
+                group_openid=group_id, msg_type=0, content=text,
+            )
+        except Exception as e:
+            logger.warning("群通知发送失败（群 %s）：%s", group_id, type(e).__name__)
+            return False
+        if not _message_sent(result):
+            logger.warning("群通知未收到有效发送回执（群 %s）", group_id)
+            return False
+        return True
 
-        未申请到 QQ 开放平台「群主动消息」权限时使用：只记录日志并返回 False，
-        上层因此不会标记去重，也不会把日志当作已发送。
-        申请权限后替换为真实主动消息接口：发送成功返回 True，失败返回 False。
-        """
-        logger.info("[主动消息][群 %s] %s", group_id, text)
-        return False
+    async def _send_group_log_only(self, group_id: str, text: str) -> bool:
+        """兼容旧回调名；发送行为由主动消息开关控制。"""
+        return await self._send_group(group_id, text)
 
     async def _remind_job(self):
         """周期检查提醒：比赛临近 + 征集登记截止 + 训练开始。"""
-        await check_reminders(self._send_group_log_only)
-        await check_general_reminders(self._send_group_log_only)
+        if not config.GROUP_ACTIVE_MESSAGES_ENABLED:
+            logger.info("主动群消息未启用，暂停提醒投递")
+            return
+        await check_reminders(self._send_group)
+        await check_general_reminders(self._send_group)
 
     async def _weekly_contest_job(self, now: datetime | None = None):
         """按北京时间本周的配置日期生成周赛（默认不通知全员）。
@@ -311,7 +380,7 @@ class ACMBot(botpy.Client):
 
     async def _crawl_job(self):
         """周期抓取公共来源（默认关闭）：变化检测 → 免审记录 → 不通知全员。"""
-        await crawler.run_fetch(send_group=self._send_group_log_only)
+        await crawler.run_fetch(send_group=self._send_group)
 
 
 def run_bot() -> None:

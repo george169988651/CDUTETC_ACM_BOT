@@ -29,7 +29,7 @@ TZ = ZoneInfo("Asia/Shanghai")
 
 HELP_TEXT = """【CDUTETC ACM 事务助手 · 命令帮助】
 --- 比赛资料 ---
-发布 <官网链接>          免审发布比赛并@全体通知（老师，@机器人发送）
+发布 <官网链接>          免审发布比赛并发送群通知（老师，@机器人发送）
 /修正 <比赛id> <字段=值 ...>  修正已发布比赛字段（超管）
 /修正 <比赛id> 重新提取 <链接>  重新提取官网信息（超管）
 --- 学校安排 ---
@@ -132,7 +132,7 @@ async def cmd_amend(group_id: str, sender: str, args: str) -> list[dict]:
     if not ok:
         return [{"group_id": group_id, "text": f"比赛 #{cid} 不存在，无法修正"}]
     changed = "；".join(f"{k}={v}" for k, v in info.items())
-    msgs = [{"group_id": group_id, "text": f"已修正比赛「{comp['name']}」（#{cid}）：{changed}\n修正已生成版本记录并通知各群"}]
+    msgs = [{"group_id": group_id, "text": f"已修正比赛「{comp['name']}」（#{cid}）：{changed}\n修正已生成版本记录"}]
     msgs += _broadcast_to_groups(comp["name"], cid, f"比赛「{comp['name']}」（#{cid}）已被超管修正：{changed}", exclude=group_id)
     return msgs
 
@@ -162,7 +162,7 @@ async def _amend_refetch(group_id: str, cid: int, comp: dict, rest: str) -> list
         return [{"group_id": group_id, "text": f"修正失败：{e}"}]
     if not ok:
         return [{"group_id": group_id, "text": f"比赛 #{cid} 不存在，无法修正"}]
-    msgs = [{"group_id": group_id, "text": f"已重新提取并修正「{fields['name']}」（#{cid}），修正版本已生成并通知各群"}]
+    msgs = [{"group_id": group_id, "text": f"已重新提取并修正「{fields['name']}」（#{cid}），修正版本已生成"}]
     msgs += _broadcast_to_groups(fields["name"], cid, f"比赛「{fields['name']}」（#{cid}）官网信息已由超管更新，请以最新信息为准", exclude=group_id)
     return msgs
 
@@ -432,9 +432,10 @@ def cmd_reminder_status(group_id: str, sender: str, args: str) -> list[dict]:
     if not is_teacher(sender):
         return [{"group_id": group_id, "text": "仅老师可查看提醒状态"}]
     pending = [d for d in db.list_pending_deliveries() if d["group_id"] == group_id]
+    state = "主动群消息：已启用" if config.GROUP_ACTIVE_MESSAGES_ENABLED else "主动群消息：未启用（定时提醒暂停）"
     if not pending:
-        return [{"group_id": group_id, "text": "本群当前无待发送提醒"}]
-    lines = ["待发送提醒："]
+        return [{"group_id": group_id, "text": state + "\n本群当前无待发送提醒"}]
+    lines = [state, "待发送提醒："]
     for d in pending[:20]:
         lines.append(f"{d['obj_type']}#{d['obj_id']}｜{d['remind_type']}｜目标 {d['target_time']}｜已尝试 {d['attempts']} 次")
     return [{"group_id": group_id, "text": "\n".join(lines)}]

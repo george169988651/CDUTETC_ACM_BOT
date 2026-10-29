@@ -11,6 +11,8 @@ import os
 # ================= QQ 机器人（必填） =================
 APPID = os.getenv("ACM_APPID", "")
 APP_SECRET = os.getenv("ACM_APP_SECRET", "")
+# 确认 QQ 平台和接收群允许主动消息后设为 1；关闭时暂停提醒投递。
+GROUP_ACTIVE_MESSAGES_ENABLED = os.getenv("ACM_GROUP_ACTIVE_MESSAGES_ENABLED", "0") == "1"
 
 # ================= 大模型（OpenAI 兼容接口，必填） =================
 LLM_API_KEY = os.getenv("ACM_LLM_API_KEY", "")
