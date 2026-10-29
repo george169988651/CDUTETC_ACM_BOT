@@ -28,6 +28,8 @@
 - **提醒投递（reminder_deliveries）**：去重键含群号（`group_id:obj_type:obj_id:remind_type:target`），发送成功才标记 sent，失败留 pending 自动重试。
 - **来源抓取（competition_sources）**：记录 ETag/Last-Modified/正文哈希/最近抓取时间/状态/错误，支撑低频抓取与变化检测。
 
+发布比赛时，正式比赛、来源 URL 和已抓取正文的哈希在同一事务保存。开启 `ACM_AUTO_FETCH_ENABLED=1` 后，新发布链接按 `ACM_FETCH_MIN_INTERVAL_MINUTES` 进入后台监控；正文未变化不再调用模型，有变化则保存待审更新。`/抓取状态` 可查看来源登记与最近检查结果。
+
 ## 消息指令
 
 | 场景 | 示例 | 权限 | 行为 |
