@@ -31,6 +31,7 @@ HELP_TEXT = """【CDUTETC ACM 事务助手 · 命令帮助】
 --- 比赛资料 ---
 发布 <官网链接>          免审发布比赛并发送群通知（老师，@机器人发送）
 /修正 <比赛id> <字段=值 ...>  修正已发布比赛字段（超管）
+  例：/修正 1 time=2026-12-01 19:00 name="ICPC 2026 区域赛"
 /修正 <比赛id> 重新提取 <链接>  重新提取官网信息（超管）
 --- 学校安排 ---
 /校安排                  查看学校统一安排（仅共享部分）
@@ -77,6 +78,59 @@ _AMEND_FIELD_MAP = {
     "summary": "summary",
 }
 
+_AMEND_ASSIGNMENT = re.compile(r"([^\s=,，]+)\s*=")
+_AMEND_NEXT_FIELD = re.compile(r"(?:\s+|[,，]\s*)(?=[^\s=,，]+\s*=)")
+_AMEND_QUOTES = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+
+
+def _parse_amend_fields(text: str) -> dict[str, str]:
+    """读取完整字段值；引号内的赋值片段、逗号和空格均属于正文。"""
+    fields: dict[str, str] = {}
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and (text[pos].isspace() or text[pos] in ",，"):
+            pos += 1
+        if pos == len(text):
+            break
+        assignment = _AMEND_ASSIGNMENT.match(text, pos)
+        if assignment is None:
+            raise ValueError("参数应为 字段=值；带赋值片段的文本请用引号包裹")
+        key = assignment[1]
+        field = _AMEND_FIELD_MAP.get(key)
+        if field is None:
+            raise ValueError(f"不支持的字段：{key}")
+        if field in fields:
+            raise ValueError(f"字段重复：{field}（含别名）")
+        pos = assignment.end()
+        value_start = pos
+        quote_start = pos
+        while quote_start < len(text) and text[quote_start].isspace():
+            quote_start += 1
+        closing_quote = _AMEND_QUOTES.get(text[quote_start]) if quote_start < len(text) else None
+        if closing_quote:
+            pos = quote_start + 1
+            value: list[str] = []
+            while pos < len(text):
+                char = text[pos]
+                if char == closing_quote:
+                    pos += 1
+                    break
+                if char == "\\" and pos + 1 < len(text) and text[pos + 1] in (closing_quote, "\\"):
+                    pos += 1
+                    char = text[pos]
+                value.append(char)
+                pos += 1
+            else:
+                raise ValueError(f"字段 {key} 的引号未闭合")
+            if pos < len(text) and not (text[pos].isspace() or text[pos] in ",，"):
+                raise ValueError(f"字段 {key} 的引号后应为空白或逗号分隔的下一个字段")
+            fields[field] = "".join(value)
+        else:
+            separator = _AMEND_NEXT_FIELD.search(text, value_start)
+            pos = separator.start() if separator else len(text)
+            fields[field] = text[value_start:pos].strip()
+    return fields
+
 
 def _broadcast_to_groups(competition_name: str, cid: int, text: str, exclude: str = "") -> list[dict]:
     """向全部允许群广播一条通知（排除触发群可选）。订阅体系已移除，修正/发布影响全体群。"""
@@ -109,20 +163,10 @@ async def cmd_amend(group_id: str, sender: str, args: str) -> list[dict]:
     rest = parts[1].strip() if len(parts) > 1 else ""
     if rest.startswith("重新提取"):
         return await _amend_refetch(group_id, cid, comp, rest)
-    info: dict[str, str] = {}
-    unknown: list[str] = []
-    for token in rest.replace("，", " ").replace(",", " ").split():
-        if "=" not in token:
-            unknown.append(token)
-            continue
-        k, v = token.split("=", 1)
-        field = _AMEND_FIELD_MAP.get(k.strip())
-        if field is None:
-            unknown.append(token)
-            continue
-        info[field] = v.strip()
-    if unknown:
-        return [{"group_id": group_id, "text": f"无法识别的字段/参数：{' '.join(unknown)}\n支持：name edition official_site official_reg_start official_reg_deadline official_time tracks official_rules device_req summary（或短名 site/reg_deadline/time/rules 等）"}]
+    try:
+        info = _parse_amend_fields(rest)
+    except ValueError as e:
+        return [{"group_id": group_id, "text": f"修正参数错误：{e}\n支持：name edition official_site official_reg_start official_reg_deadline official_time tracks official_rules device_req summary（或短名 site/reg_deadline/time/rules 等）"}]
     if not info:
         return [{"group_id": group_id, "text": "请提供至少一个要修正的字段，如 /修正 1 official_reg_deadline=2026-12-01 23:59"}]
     try:
