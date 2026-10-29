@@ -111,15 +111,19 @@ def parse_contest_result(content: str) -> tuple[dict | None, str | None]:
 
 
 def _limit_contests(contests: list[dict], max_items: int = 5, max_chars: int = 1200) -> list[dict]:
-    """按条数与总字符数限制送入模型的存档上下文（调用方已按群筛选）。"""
+    """按条数与总字符数限制送入模型的存档上下文（调用方已筛选可见记录）。"""
     out: list[dict] = []
     used = 0
     for c in contests[:max_items]:
         item = {
             k: c.get(k, "")
-            for k in ("name", "reg_deadline", "contest_time", "mode", "location")
+            for k in ("name", "reg_deadline", "contest_time", "mode", "location", "source_link")
         }
         s = json.dumps(item, ensure_ascii=False)
+        if used + len(s) > max_chars and item["source_link"]:
+            # 来源是可选信息；长链接不应挤掉比赛名称和时间，也不截断 URL。
+            item.pop("source_link")
+            s = json.dumps(item, ensure_ascii=False)
         if used + len(s) > max_chars:
             break
         out.append(item)
@@ -174,7 +178,7 @@ async def extract_contest(raw_text: str) -> tuple[dict | None, str | None]:
 
 
 async def answer_question(question: str, contests: list[dict]) -> str:
-    """按本群存档回答提问。contests 须为调用方按群筛选、限量的结果。"""
+    """按可见存档回答提问。contests 须为调用方筛选、限量的结果。"""
     question = (question or "")[: config.LLM_MAX_INPUT_CHARS]
     if not question.strip():
         return "请把问题说得具体一点~"

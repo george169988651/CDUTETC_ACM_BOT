@@ -388,13 +388,46 @@ def list_contests(group_id: str | None = None) -> list[dict]:
 
 
 def list_recent_contests(group_id: str, limit: int = 5) -> list[dict]:
-    """查询某群最近 N 条群级比赛（用于问答上下文，控制数量）。"""
+    """查询某群最近 N 条旧版群级比赛，保留兼容接口。"""
     with _connect() as conn:
         rows = conn.execute(
             f"SELECT {_CONTEST_COLS} FROM contests WHERE group_id = ? ORDER BY id DESC LIMIT ?",
             (group_id, limit),
         ).fetchall()
     return [_row_to_contest(r) for r in rows]
+
+
+def list_question_contests(group_id: str, limit: int = 5) -> list[dict]:
+    """查询问答用比赛：已确认公共比赛 + 本群已归属的旧记录。
+
+    调用方须先校验群白名单。v2 公共正式比赛供允许群共享，草稿与待审
+    更新不进入上下文；旧记录在 SQL 层按群过滤。按最近更新/创建时间
+    排序并限量，统一为问答使用的名称、时间、形式、地点和来源字段。
+    """
+    if not group_id or limit <= 0:
+        return []
+    fields = ("name", "reg_deadline", "contest_time", "mode", "location", "source_link")
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT name, reg_deadline, contest_time, mode, location, source_link
+            FROM (
+                SELECT name, official_reg_deadline AS reg_deadline,
+                       official_time AS contest_time, '' AS mode, '' AS location,
+                       official_site AS source_link, updated_at AS sort_time,
+                       1 AS is_public, id
+                FROM competitions WHERE status = 'confirmed'
+                UNION ALL
+                SELECT name, reg_deadline, contest_time, mode, location,
+                       source_link, created_at AS sort_time, 0 AS is_public, id
+                FROM contests WHERE group_id = ?
+            )
+            ORDER BY sort_time DESC, is_public DESC, id DESC
+            LIMIT ?
+            """,
+            (group_id, limit),
+        ).fetchall()
+    return [dict(zip(fields, row)) for row in rows]
 
 
 def delete_contest(group_id: str, cid: int) -> bool:
