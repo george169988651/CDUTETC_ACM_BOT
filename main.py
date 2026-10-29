@@ -20,6 +20,8 @@
 """
 
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import botpy
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -254,34 +256,56 @@ class ACMBot(botpy.Client):
         await check_reminders(self._send_group_log_only)
         await check_general_reminders(self._send_group_log_only)
 
-    async def _weekly_contest_job(self):
-        """自动周赛：每周日按模板生成周赛记录（默认不通知全员）。
+    async def _weekly_contest_job(self, now: datetime | None = None):
+        """按北京时间本周的配置日期生成周赛（默认不通知全员）。
 
-        生成前检查本周是否已有同名记录，避免重复；生成记录不主动通知，
-        超管确认后再通知全员或 /修正 调整/删除。
+        数据库按周持久化去重，避免重启、重复调度或改名造成重复记录。
+        now 供离线验证注入；无时区的注入时间按北京时间处理。
         """
+        if not config.WEEKLY_CONTEST_ENABLED:
+            return
         template = config.WEEKLY_CONTEST_TEMPLATE
-        for c in db.list_competitions():
-            if c.get("name") == template:
-                logger.info("本周周赛记录已存在，跳过自动生成（比赛 id=%s）", c["id"])
-                return
-        start = config.WEEKLY_CONTEST_START
-        end = config.WEEKLY_CONTEST_END
         try:
-            cid = create_competition(
+            tz = ZoneInfo(config.TZ_NAME)
+            now = now or datetime.now(tz)
+            now = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
+            if not 0 <= config.WEEKLY_CONTEST_WEEKDAY <= 6:
+                raise ValueError("周赛星期必须在 0（周一）到 6（周日）之间")
+            week_start = now.date() - timedelta(days=now.weekday())
+            contest_date = week_start + timedelta(days=config.WEEKLY_CONTEST_WEEKDAY)
+            start = datetime.combine(
+                contest_date,
+                datetime.strptime(config.WEEKLY_CONTEST_START, "%H:%M").time(),
+                tzinfo=tz,
+            )
+            end = datetime.combine(
+                contest_date,
+                datetime.strptime(config.WEEKLY_CONTEST_END, "%H:%M").time(),
+                tzinfo=tz,
+            )
+            if end <= start:
+                raise ValueError("周赛结束时间必须晚于开始时间")
+            start_str = start.strftime("%Y-%m-%d %H:%M")
+            end_str = end.strftime("%Y-%m-%d %H:%M")
+            cid, created = db.create_weekly_competition(
+                week_start.isoformat(),
                 {
                     "name": template,
                     "official_reg_deadline": "",
-                    "official_time": f"本周日 {start}-{end}",
+                    "official_time": start_str,
                     "official_rules": "",
                     "official_site": "",
-                    "summary": "自动周赛（模板生成，默认不通知全员）",
+                    "summary": (
+                        "自动周赛（模板生成，默认不通知全员）；"
+                        f"时间：{start_str} 至 {end_str}"
+                    ),
                 },
-                status="confirmed",
-                operator="weekly:auto",
             )
         except ValueError as e:
             logger.warning("自动周赛生成失败: %s", e)
+            return
+        if not created:
+            logger.info("本周周赛记录已存在，跳过自动生成（比赛 id=%s）", cid)
             return
         logger.info("已自动生成周赛记录: %s（id=%s），未通知全员", template, cid)
 
